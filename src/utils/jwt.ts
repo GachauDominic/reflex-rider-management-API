@@ -1,8 +1,8 @@
 import jwt, { SignOptions } from "jsonwebtoken";
 import { AuthTokenPayload } from "../types";
 
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "12h";
+const JWT_SECRET = process.env.JWT_SECRET as string;
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN;
 
 export function signToken(payload: AuthTokenPayload): string {
   const options: SignOptions = {

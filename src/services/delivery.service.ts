@@ -191,7 +191,12 @@ export async function cancelDelivery(actor: AuthTokenPayload, id: string, note: 
     );
   }
 
-  await recordEvent(id, actor.sub, "CANCELLED", note && String(note).slice(0, 500));
+  await recordEvent(
+    id,
+    actor.sub,
+    "CANCELLED",
+    note == null ? undefined : String(note).slice(0, 500)
+  );
   deliveryEventBus.publish({ type: "DELIVERY_CANCELLED", delivery: updated });
 
   return updated;
@@ -237,7 +242,12 @@ export async function updateDeliveryStatus(actor: AuthTokenPayload, id: string, 
     throw new ConflictError("Delivery was updated by someone else — refresh and retry");
   }
 
-  await recordEvent(id, actor.sub, targetStatus, note && String(note).slice(0, 500));
+  await recordEvent(
+    id, 
+    actor.sub, 
+    targetStatus, 
+    note == null ? undefined : String(note).slice(0, 500));
+
   deliveryEventBus.publish({ type: "DELIVERY_STATUS_UPDATED", delivery: updated });
 
   return updated;
