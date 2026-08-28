@@ -1,18 +1,27 @@
 import { Pool } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "./schema";
+import "dotenv/config"
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL is not set. Copy .env.example to .env and configure it.");
-}
+const connectionString = process.env.DATABASE_URL as string;
 
 // Works against a local Postgres instance or a hosted Postgres (e.g. Neon)
 // connection string. For Neon, use the pooled connection string.
 export const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL.includes("localhost")
-    ? false
-    : { rejectUnauthorized: false },
+  connectionString,
+  // ssl: connectionString.includes("localhost")
+  //   ? false
+  //   : { rejectUnauthorized: false },
 });
 
-export const db = drizzle(pool, { schema });
+const main = async() => {
+  await pool.connect();
+}
+main().then(()=>{
+console.log("Connected to the DB")
+}).catch((error)=>{
+  console.error("Error connecting to the DB: ", error)
+})
+
+export const db = drizzle(pool, { schema, logger: true });
+

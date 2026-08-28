@@ -26,15 +26,15 @@
     "node": ">=18"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
     "@types/jest": "^29.5.12",
     "@types/jsonwebtoken": "^9.0.6",
     "@types/k6": "^0.52.0",
-    "@types/node": "^20.14.2",
+    "@types/node": "^20.19.43",
     "@types/nodemailer": "^6.4.15",
     "@types/pg": "^8.11.6",
     "@types/supertest": "^6.0.2",
-    "@types/bcryptjs": "^2.4.6",
     "drizzle-kit": "^0.22.8",
     "jest": "^29.7.0",
     "supertest": "^7.0.0",
