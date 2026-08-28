@@ -136,9 +136,9 @@ export const deliveryEventsRelations = relations(deliveryEvents, ({ one }) => ({
 
 // ---------- Inferred types ----------
 
-export type User = typeof users.$inferSelect;
-export type NewUser = typeof users.$inferInsert;
-export type Delivery = typeof deliveries.$inferSelect;
-export type NewDelivery = typeof deliveries.$inferInsert;
-export type DeliveryEvent = typeof deliveryEvents.$inferSelect;
-export type NewDeliveryEvent = typeof deliveryEvents.$inferInsert;
+export type TSUser = typeof users.$inferSelect;
+export type TINewUser = typeof users.$inferInsert;
+export type TSDelivery = typeof deliveries.$inferSelect;
+export type TINewDelivery = typeof deliveries.$inferInsert;
+export type TSDeliveryEvent = typeof deliveryEvents.$inferSelect;
+export type TINewDeliveryEvent = typeof deliveryEvents.$inferInsert;
