@@ -165,13 +165,3 @@ against the target environment first — and never against production.
 Live GPS tracking, payments, a customer-facing app, route optimization, SMS/
 WhatsApp gateways, analytics dashboards, microservices, and fleet management
 are intentionally excluded to keep this a focused MVP.
-
-## A note on this build
-
-This codebase was written and reviewed in a sandboxed environment with no
-network access, so `npm install`, the actual Postgres connection, and the
-test/k6 runs could not be executed here — everything was hand-verified for
-correctness instead of compiler/CI-verified. Run `npm install` and the test
-suite in your own environment before treating this as production-ready, and
-open an issue (or just tell me) if anything doesn't compile or run as
-expected — happy to fix it on the spot.
