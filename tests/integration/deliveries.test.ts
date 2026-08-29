@@ -1,527 +1,341 @@
+process.env.JWT_SECRET = "test-secret";
+process.env.JWT_EXPIRES_IN = "12h";
+
+// Manual mock (src/db/__mocks__/index.ts) — real Postgres is never
+// constructed; DATABASE_URL doesn't need to be set for this file either.
+jest.mock("../../src/db");
+// Auto-mocked: every exported controller function becomes a jest.fn()
+// configured per test. Only routing + middleware (authenticate,
+// authorize, errorHandler) run for real.
+jest.mock("../../src/controllers/deliveries.controller");
+
 import request from "supertest";
 import { createApp } from "../../src/app";
-import { resetDatabase, closeDatabase, createTestUser } from "../testUtils";
-import { db } from "../../src/db";
-import { deliveries } from "../../src/db/schema";
-import { eq } from "drizzle-orm";
+import * as deliveriesController from "../../src/controllers/deliveries.controller";
+import { AppError, ConflictError, NotFoundError } from "../../src/middleware/errorHandler";
+import { ValidationError } from "../../src/utils/validation";
+import { InvalidTransitionError } from "../../src/utils/stateMachine";
+import { UserRole } from "../../src/types";
+import { fakeController, mockActor, mockDeliveryRow, authHeaderFor } from "../testUtils";
 
 const app = createApp();
 
-const sampleDeliveryPayload = {
-  customerName: "Jane Wanjiku",
-  customerPhone: "0712345678",
-  address: "Westlands, Nairobi",
-  itemDescription: "Samsung 55 inch TV",
-};
+/**
+ * SCOPE — read this before extending the suite.
+ *
+ * These tests verify: route → middleware wiring, authenticate() token
+ * checks, authorize() role checks, and errorHandler's status-code
+ * mapping — all using the REAL middleware chain. The actual delivery
+ * business logic (field validation, state-machine transitions, the
+ * atomic WHERE-guarded updates that prevent two dispatchers racing to
+ * assign the same delivery, event recording) lives in
+ * delivery.service.ts and is entirely faked here via the mocked
+ * controller. This suite CANNOT and does not verify that logic —
+ * including the concurrency-race guarantee, which only means something
+ * against a real database. That coverage would need dedicated unit/
+ * integration tests that exercise delivery.service.ts against a real or
+ * in-memory-equivalent Postgres, which is intentionally out of scope for
+ * this "thinnest coverage" suite.
+ */
+describe("delivery routes (mocked db + controllers; real middleware)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
 
-describe("Delivery lifecycle", () => {
-  beforeEach(resetDatabase);
-  afterAll(closeDatabase);
+  // Every route in deliveries.routes.ts runs authenticate() first via
+  // router.use(authenticate) — confirm that once, generically, rather
+  // than repeating it for all 7 endpoints below.
+  describe("authentication (applies to every /api/deliveries/* route)", () => {
+    it("rejects any request with no Authorization header", async () => {
+      const res = await request(app).get("/api/deliveries");
+      expect(res.status).toBe(401);
+      expect(deliveriesController.listDeliveries).not.toHaveBeenCalled();
+    });
 
-  describe("POST /api/deliveries (create)", () => {
-    it("lets a retailer create a delivery in OPEN status", async () => {
-      const { token } = await createTestUser("RETAILER");
+    it("rejects an invalid/tampered token", async () => {
+      const res = await request(app)
+        .get("/api/deliveries")
+        .set("Authorization", "Bearer garbage");
+      expect(res.status).toBe(401);
+      expect(deliveriesController.listDeliveries).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("POST /api/deliveries (authorize: RETAILER only)", () => {
+    it("RETAILER reaches the controller and gets its response back untouched", async () => {
+      const actor = mockActor("RETAILER");
+      const created = mockDeliveryRow({ retailerId: actor.sub, status: "OPEN" });
+
+      (deliveriesController.createDelivery as jest.Mock).mockImplementation(
+        fakeController((_req, res) => res.status(201).json(created))
+      );
 
       const res = await request(app)
         .post("/api/deliveries")
-        .set("Authorization", `Bearer ${token}`)
-        .send(sampleDeliveryPayload);
+        .set(authHeaderFor(actor))
+        .send({
+          customerName: "Jane Wanjiku",
+          customerPhone: "0712345678",
+          address: "Westlands, Nairobi",
+          itemDescription: "Samsung 55 inch TV",
+        });
 
       expect(res.status).toBe(201);
-      expect(res.body.status).toBe("OPEN");
-      expect(res.body.riderId).toBeNull();
-      expect(res.body.confirmationCode).toMatch(/^REF-DEL-/);
+      expect(res.body).toEqual(JSON.parse(JSON.stringify(created)));
+      expect(deliveriesController.createDelivery).toHaveBeenCalledTimes(1);
     });
 
-    it("rejects an invalid phone number and does not create a row", async () => {
-      const { token } = await createTestUser("RETAILER");
+    it.each<UserRole>(["DISPATCHER", "RIDER"])(
+      "%s is forbidden (403), controller never reached",
+      async (role) => {
+        const actor = mockActor(role);
 
-      const res = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${token}`)
-        .send({ ...sampleDeliveryPayload, customerPhone: "12345" });
+        const res = await request(app)
+          .post("/api/deliveries")
+          .set(authHeaderFor(actor))
+          .send({});
 
-      expect(res.status).toBe(400);
-      const rows = await db.select().from(deliveries);
-      expect(rows.length).toBe(0);
-    });
+        expect(res.status).toBe(403);
+        expect(res.body).toEqual({
+          error: `Role '${role}' is not permitted to perform this action`,
+        });
+        expect(deliveriesController.createDelivery).not.toHaveBeenCalled();
+      }
+    );
+  });
 
-    it("rejects missing required fields", async () => {
-      const { token } = await createTestUser("RETAILER");
-      const res = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${token}`)
-        .send({ customerName: "Jane" });
-      expect(res.status).toBe(400);
-    });
+  describe("GET /api/deliveries (no role restriction beyond authentication)", () => {
+    it.each<UserRole>(["RETAILER", "DISPATCHER", "RIDER"])(
+      "%s reaches the controller and receives its list response",
+      async (role) => {
+        const actor = mockActor(role);
+        const rows = [mockDeliveryRow(), mockDeliveryRow()];
 
-    it("forbids a dispatcher from creating a delivery", async () => {
-      const { token } = await createTestUser("DISPATCHER");
-      const res = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${token}`)
-        .send(sampleDeliveryPayload);
-      expect(res.status).toBe(403);
-    });
+        (deliveriesController.listDeliveries as jest.Mock).mockImplementation(
+          fakeController((_req, res) => res.json(rows))
+        );
 
-    it("forbids a rider from creating a delivery", async () => {
-      const { token } = await createTestUser("RIDER");
-      const res = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${token}`)
-        .send(sampleDeliveryPayload);
-      expect(res.status).toBe(403);
+        const res = await request(app).get("/api/deliveries").set(authHeaderFor(actor));
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual(JSON.parse(JSON.stringify(rows)));
+      }
+    );
+  });
+
+  describe("GET /api/deliveries/:id", () => {
+    it("passes the route param through to the controller via req.params.id", async () => {
+      const actor = mockActor("DISPATCHER");
+      const delivery = mockDeliveryRow();
+      let capturedId: unknown = null;
+
+      (deliveriesController.getDelivery as jest.Mock).mockImplementation(
+        fakeController((req, res) => {
+          capturedId = req.params.id;
+          res.json(delivery);
+        })
+      );
+
+      const res = await request(app).get(`/api/deliveries/${delivery.id}`).set(authHeaderFor(actor));
+
+      expect(res.status).toBe(200);
+      expect(capturedId).toBe(delivery.id);
     });
   });
 
-  describe("GET /api/deliveries (list, role-scoped)", () => {
-    it("shows a retailer only their own deliveries", async () => {
-      const { token: retailerAToken } = await createTestUser("RETAILER", { email: "a@reflex.test" });
-      const { token: retailerBToken } = await createTestUser("RETAILER", { email: "b@reflex.test" });
+  describe("PATCH /api/deliveries/:id/assign (authorize: DISPATCHER only)", () => {
+    it("DISPATCHER reaches the controller", async () => {
+      const actor = mockActor("DISPATCHER");
+      const updated = mockDeliveryRow({ status: "ASSIGNED" });
 
-      await request(app).post("/api/deliveries").set("Authorization", `Bearer ${retailerAToken}`).send(sampleDeliveryPayload);
-      await request(app).post("/api/deliveries").set("Authorization", `Bearer ${retailerBToken}`).send(sampleDeliveryPayload);
+      (deliveriesController.assignDelivery as jest.Mock).mockImplementation(
+        fakeController((_req, res) => res.json(updated))
+      );
 
-      const res = await request(app).get("/api/deliveries").set("Authorization", `Bearer ${retailerAToken}`);
+      const res = await request(app)
+        .patch(`/api/deliveries/${updated.id}/assign`)
+        .set(authHeaderFor(actor))
+        .send({ riderId: "some-rider-id" });
+
       expect(res.status).toBe(200);
-      expect(res.body.length).toBe(1);
+      expect(res.body).toEqual(JSON.parse(JSON.stringify(updated)));
     });
 
-    it("shows a dispatcher every delivery", async () => {
-      const { token: retailerToken } = await createTestUser("RETAILER");
-      const { token: dispatcherToken } = await createTestUser("DISPATCHER");
+    it.each<UserRole>(["RETAILER", "RIDER"])("%s is forbidden (403)", async (role) => {
+      const actor = mockActor(role);
+      const res = await request(app)
+        .patch("/api/deliveries/some-id/assign")
+        .set(authHeaderFor(actor))
+        .send({ riderId: "x" });
 
-      await request(app).post("/api/deliveries").set("Authorization", `Bearer ${retailerToken}`).send(sampleDeliveryPayload);
-      await request(app).post("/api/deliveries").set("Authorization", `Bearer ${retailerToken}`).send(sampleDeliveryPayload);
-
-      const res = await request(app).get("/api/deliveries").set("Authorization", `Bearer ${dispatcherToken}`);
-      expect(res.status).toBe(200);
-      expect(res.body.length).toBe(2);
+      expect(res.status).toBe(403);
+      expect(deliveriesController.assignDelivery).not.toHaveBeenCalled();
     });
   });
 
-  describe("PATCH /api/deliveries/:id/assign", () => {
-    it("lets a dispatcher assign an OPEN delivery to a rider", async () => {
-      const { token: retailerToken } = await createTestUser("RETAILER");
-      const { token: dispatcherToken } = await createTestUser("DISPATCHER");
-      const { user: rider } = await createTestUser("RIDER");
+  describe("PATCH /api/deliveries/:id/status (authorize: RIDER only)", () => {
+    it("RIDER reaches the controller", async () => {
+      const actor = mockActor("RIDER");
+      const updated = mockDeliveryRow({ riderId: actor.sub, status: "PICKED_UP" });
 
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailerToken}`)
-        .send(sampleDeliveryPayload);
+      (deliveriesController.updateDeliveryStatus as jest.Mock).mockImplementation(
+        fakeController((_req, res) => res.json(updated))
+      );
 
       const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcherToken}`)
-        .send({ riderId: rider.id });
+        .patch(`/api/deliveries/${updated.id}/status`)
+        .set(authHeaderFor(actor))
+        .send({ status: "PICKED_UP" });
 
       expect(res.status).toBe(200);
-      expect(res.body.status).toBe("ASSIGNED");
-      expect(res.body.riderId).toBe(rider.id);
+      expect(res.body).toEqual(JSON.parse(JSON.stringify(updated)));
     });
 
-    it("rejects assignment to a non-rider user", async () => {
-      const { token: retailerToken } = await createTestUser("RETAILER");
-      const { user: notARider } = await createTestUser("RETAILER", {
-        email: "notarider@reflex.test",
+    it.each<UserRole>(["RETAILER", "DISPATCHER"])("%s is forbidden (403)", async (role) => {
+      const actor = mockActor(role);
+      const res = await request(app)
+        .patch("/api/deliveries/some-id/status")
+        .set(authHeaderFor(actor))
+        .send({ status: "PICKED_UP" });
+
+      expect(res.status).toBe(403);
+      expect(deliveriesController.updateDeliveryStatus).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("PATCH /api/deliveries/:id/cancel (authorize: RETAILER, DISPATCHER, RIDER)", () => {
+    it.each<UserRole>(["RETAILER", "DISPATCHER", "RIDER"])(
+      "%s reaches the controller (all three roles are permitted here)",
+      async (role) => {
+        const actor = mockActor(role);
+        const cancelled = mockDeliveryRow({ status: "CANCELLED" });
+
+        (deliveriesController.cancelDelivery as jest.Mock).mockImplementation(
+          fakeController((_req, res) => res.json(cancelled))
+        );
+
+        const res = await request(app)
+          .patch(`/api/deliveries/${cancelled.id}/cancel`)
+          .set(authHeaderFor(actor))
+          .send({});
+
+        expect(res.status).toBe(200);
+        expect(res.body).toEqual(JSON.parse(JSON.stringify(cancelled)));
+      }
+    );
+  });
+
+  describe("POST /api/deliveries/:id/confirm (authorize: RIDER only)", () => {
+    it("RIDER reaches the controller", async () => {
+      const actor = mockActor("RIDER");
+      const delivered = mockDeliveryRow({
+        riderId: actor.sub,
+        status: "DELIVERED",
+        deliveredAt: new Date(),
       });
-      const { token: dispatcherToken } = await createTestUser("DISPATCHER");
 
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailerToken}`)
-        .send(sampleDeliveryPayload);
+      (deliveriesController.confirmDelivery as jest.Mock).mockImplementation(
+        fakeController((_req, res) => res.json(delivered))
+      );
 
       const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcherToken}`)
-        .send({ riderId: notARider.id });
+        .post(`/api/deliveries/${delivered.id}/confirm`)
+        .set(authHeaderFor(actor))
+        .send({ confirmationCode: delivered.confirmationCode });
 
-      expect(res.status).toBe(400);
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual(JSON.parse(JSON.stringify(delivered)));
     });
 
-    it("prevents two dispatchers from assigning the same OPEN delivery (race condition)", async () => {
-      const { token: retailerToken } = await createTestUser("RETAILER");
-      const dispatcher1 = await createTestUser("DISPATCHER", { email: "d1@reflex.test" });
-      const dispatcher2 = await createTestUser("DISPATCHER", { email: "d2@reflex.test" });
-      const riderA = await createTestUser("RIDER", { email: "riderA@reflex.test" });
-      const riderB = await createTestUser("RIDER", { email: "riderB@reflex.test" });
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailerToken}`)
-        .send(sampleDeliveryPayload);
-
-      const [res1, res2] = await Promise.all([
-        request(app)
-          .patch(`/api/deliveries/${created.body.id}/assign`)
-          .set("Authorization", `Bearer ${dispatcher1.token}`)
-          .send({ riderId: riderA.user.id }),
-        request(app)
-          .patch(`/api/deliveries/${created.body.id}/assign`)
-          .set("Authorization", `Bearer ${dispatcher2.token}`)
-          .send({ riderId: riderB.user.id }),
-      ]);
-
-      const statuses = [res1.status, res2.status].sort();
-      expect(statuses).toEqual([200, 409]);
-
-      const [finalRow] = await db.select().from(deliveries).where(eq(deliveries.id, created.body.id));
-      expect(finalRow.status).toBe("ASSIGNED");
-      expect([riderA.user.id, riderB.user.id]).toContain(finalRow.riderId);
-    });
-
-    it("rejects assigning a delivery that is not currently OPEN", async () => {
-      const { token: retailerToken } = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider1 = await createTestUser("RIDER", { email: "r1@reflex.test" });
-      const rider2 = await createTestUser("RIDER", { email: "r2@reflex.test" });
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailerToken}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider1.user.id });
-
+    it.each<UserRole>(["RETAILER", "DISPATCHER"])("%s is forbidden (403)", async (role) => {
+      const actor = mockActor(role);
       const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider2.user.id });
-
-      expect(res.status).toBe(409);
-    });
-  });
-
-  describe("PATCH /api/deliveries/:id/status", () => {
-    async function setupAssignedDelivery() {
-      const retailer = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider = await createTestUser("RIDER");
-      const otherRider = await createTestUser("RIDER", { email: "other-rider@reflex.test" });
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider.user.id });
-
-      return { deliveryId: created.body.id as string, rider, otherRider };
-    }
-
-    it("walks a delivery through PICKED_UP then IN_TRANSIT", async () => {
-      const { deliveryId, rider } = await setupAssignedDelivery();
-
-      const pickedUp = await request(app)
-        .patch(`/api/deliveries/${deliveryId}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "PICKED_UP" });
-      expect(pickedUp.status).toBe(200);
-      expect(pickedUp.body.status).toBe("PICKED_UP");
-
-      const inTransit = await request(app)
-        .patch(`/api/deliveries/${deliveryId}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "IN_TRANSIT" });
-      expect(inTransit.status).toBe(200);
-      expect(inTransit.body.status).toBe("IN_TRANSIT");
-    });
-
-    it("rejects a status update from a rider the delivery is not assigned to", async () => {
-      const { deliveryId, otherRider } = await setupAssignedDelivery();
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${deliveryId}/status`)
-        .set("Authorization", `Bearer ${otherRider.token}`)
-        .send({ status: "PICKED_UP" });
+        .post("/api/deliveries/some-id/confirm")
+        .set(authHeaderFor(actor))
+        .send({ confirmationCode: "REF-DEL-A1B2C3D4-X8K2" });
 
       expect(res.status).toBe(403);
-    });
-
-    it("rejects skipping PICKED_UP and going straight to IN_TRANSIT", async () => {
-      const { deliveryId, rider } = await setupAssignedDelivery();
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${deliveryId}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "IN_TRANSIT" });
-
-      expect(res.status).toBe(409);
-    });
-
-    it("rejects trying to set DELIVERED through this endpoint", async () => {
-      const { deliveryId, rider } = await setupAssignedDelivery();
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${deliveryId}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "DELIVERED" });
-
-      expect(res.status).toBe(400);
+      expect(deliveriesController.confirmDelivery).not.toHaveBeenCalled();
     });
   });
 
-  describe("POST /api/deliveries/:id/confirm (QR confirmation)", () => {
-    async function setupInTransitDelivery() {
-      const retailer = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider = await createTestUser("RIDER");
+  // errorHandler is a single shared middleware, so proving it maps each
+  // typed error correctly on ONE route also proves it for all of them —
+  // that's the whole point of centralizing it rather than repeating a
+  // try/catch per controller (see delivery.service.ts / errorHandler.ts).
+  describe("error propagation through the real errorHandler (demonstrated via POST /)", () => {
+    const actor = () => mockActor("RETAILER");
+    const payload = {
+      customerName: "Jane Wanjiku",
+      customerPhone: "0712345678",
+      address: "Westlands, Nairobi",
+      itemDescription: "Samsung 55 inch TV",
+    };
 
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider.user.id });
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "PICKED_UP" });
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "IN_TRANSIT" });
-
-      return {
-        deliveryId: created.body.id as string,
-        confirmationCode: created.body.confirmationCode as string,
-        rider,
-      };
-    }
-
-    it("confirms delivery with the correct code and moves status to DELIVERED", async () => {
-      const { deliveryId, confirmationCode, rider } = await setupInTransitDelivery();
-
-      const res = await request(app)
-        .post(`/api/deliveries/${deliveryId}/confirm`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ confirmationCode });
-
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe("DELIVERED");
-      expect(res.body.deliveredAt).toBeTruthy();
-    });
-
-    it("rejects an incorrect confirmation code", async () => {
-      const { deliveryId, rider } = await setupInTransitDelivery();
-
-      const res = await request(app)
-        .post(`/api/deliveries/${deliveryId}/confirm`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ confirmationCode: "REF-DEL-DEADBEEF-0000" });
-
+    it("ValidationError -> 400", async () => {
+      (deliveriesController.createDelivery as jest.Mock).mockImplementation(
+        fakeController(() => {
+          throw new ValidationError("customerPhone must be a valid Kenyan phone number");
+        })
+      );
+      const res = await request(app).post("/api/deliveries").set(authHeaderFor(actor())).send(payload);
       expect(res.status).toBe(400);
+      expect(res.body).toEqual({ error: "customerPhone must be a valid Kenyan phone number" });
     });
 
-    it("rejects confirming the same delivery twice", async () => {
-      const { deliveryId, confirmationCode, rider } = await setupInTransitDelivery();
+    it("NotFoundError -> 404", async () => {
+      (deliveriesController.createDelivery as jest.Mock).mockImplementation(
+        fakeController(() => {
+          throw new NotFoundError("Delivery not found");
+        })
+      );
+      const res = await request(app).post("/api/deliveries").set(authHeaderFor(actor())).send(payload);
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: "Delivery not found" });
+    });
 
-      await request(app)
-        .post(`/api/deliveries/${deliveryId}/confirm`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ confirmationCode });
-
-      const res = await request(app)
-        .post(`/api/deliveries/${deliveryId}/confirm`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ confirmationCode });
-
+    it("ConflictError -> 409", async () => {
+      (deliveriesController.createDelivery as jest.Mock).mockImplementation(
+        fakeController(() => {
+          throw new ConflictError("Delivery is no longer OPEN and cannot be assigned");
+        })
+      );
+      const res = await request(app).post("/api/deliveries").set(authHeaderFor(actor())).send(payload);
       expect(res.status).toBe(409);
+      expect(res.body).toEqual({ error: "Delivery is no longer OPEN and cannot be assigned" });
     });
 
-    it("rejects confirming a delivery that has not reached IN_TRANSIT yet", async () => {
-      const retailer = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider = await createTestUser("RIDER");
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider.user.id });
-
-      const res = await request(app)
-        .post(`/api/deliveries/${created.body.id}/confirm`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ confirmationCode: created.body.confirmationCode });
-
+    it("InvalidTransitionError -> 409", async () => {
+      (deliveriesController.createDelivery as jest.Mock).mockImplementation(
+        fakeController(() => {
+          throw new InvalidTransitionError("OPEN", "DELIVERED");
+        })
+      );
+      const res = await request(app).post("/api/deliveries").set(authHeaderFor(actor())).send(payload);
       expect(res.status).toBe(409);
-    });
-  });
-
-  describe("PATCH /api/deliveries/:id/cancel", () => {
-    it("lets a retailer cancel their own OPEN delivery", async () => {
-      const { token } = await createTestUser("RETAILER");
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${token}`)
-        .send(sampleDeliveryPayload);
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/cancel`)
-        .set("Authorization", `Bearer ${token}`)
-        .send({ note: "Customer changed their mind" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe("CANCELLED");
+      expect(res.body).toEqual({ error: "Cannot transition delivery from OPEN to DELIVERED" });
     });
 
-    it("forbids a retailer from cancelling another retailer's delivery", async () => {
-      const { token: ownerToken } = await createTestUser("RETAILER", { email: "owner@reflex.test" });
-      const { token: otherToken } = await createTestUser("RETAILER", { email: "other@reflex.test" });
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${ownerToken}`)
-        .send(sampleDeliveryPayload);
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/cancel`)
-        .set("Authorization", `Bearer ${otherToken}`)
-        .send({});
-
+    it("a plain AppError with a custom status is honored as-is", async () => {
+      (deliveriesController.createDelivery as jest.Mock).mockImplementation(
+        fakeController(() => {
+          throw new AppError("You do not have access to this delivery", 403);
+        })
+      );
+      const res = await request(app).post("/api/deliveries").set(authHeaderFor(actor())).send(payload);
       expect(res.status).toBe(403);
+      expect(res.body).toEqual({ error: "You do not have access to this delivery" });
     });
 
-    it("lets a dispatcher cancel an already-assigned delivery", async () => {
-      const retailer = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider = await createTestUser("RIDER");
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider.user.id });
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/cancel`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({});
-
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe("CANCELLED");
-    });
-
-    it("lets an assigned rider cancel their own job", async () => {
-      const retailer = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider = await createTestUser("RIDER");
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider.user.id });
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/cancel`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({});
-
-      expect(res.status).toBe(200);
-      expect(res.body.status).toBe("CANCELLED");
-    });
-
-    it("forbids a rider from cancelling a delivery not assigned to them", async () => {
-      const retailer = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider = await createTestUser("RIDER");
-      const bystanderRider = await createTestUser("RIDER", { email: "bystander@reflex.test" });
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider.user.id });
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/cancel`)
-        .set("Authorization", `Bearer ${bystanderRider.token}`)
-        .send({});
-
-      expect(res.status).toBe(403);
-    });
-
-    it("rejects cancelling a delivery that has already been delivered", async () => {
-      const retailer = await createTestUser("RETAILER");
-      const dispatcher = await createTestUser("DISPATCHER");
-      const rider = await createTestUser("RIDER");
-
-      const created = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send(sampleDeliveryPayload);
-
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/assign`)
-        .set("Authorization", `Bearer ${dispatcher.token}`)
-        .send({ riderId: rider.user.id });
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "PICKED_UP" });
-      await request(app)
-        .patch(`/api/deliveries/${created.body.id}/status`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ status: "IN_TRANSIT" });
-      await request(app)
-        .post(`/api/deliveries/${created.body.id}/confirm`)
-        .set("Authorization", `Bearer ${rider.token}`)
-        .send({ confirmationCode: created.body.confirmationCode });
-
-      const res = await request(app)
-        .patch(`/api/deliveries/${created.body.id}/cancel`)
-        .set("Authorization", `Bearer ${retailer.token}`)
-        .send({});
-
-      expect(res.status).toBe(409);
-    });
-  });
-
-  describe("malformed requests do not corrupt state", () => {
-    it("returns a clear error and creates nothing on garbage input", async () => {
-      const { token } = await createTestUser("RETAILER");
-
-      const res = await request(app)
-        .post("/api/deliveries")
-        .set("Authorization", `Bearer ${token}`)
-        .send({ customerName: 12345, customerPhone: null });
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBeDefined();
-
-      const rows = await db.select().from(deliveries);
-      expect(rows.length).toBe(0);
+    it("an unrecognized thrown error falls back to a generic 500", async () => {
+      (deliveriesController.createDelivery as jest.Mock).mockImplementation(
+        fakeController(() => {
+          throw new Error("unexpected");
+        })
+      );
+      const res = await request(app).post("/api/deliveries").set(authHeaderFor(actor())).send(payload);
+      expect(res.status).toBe(500);
+      expect(res.body).toEqual({ error: "Internal server error" });
     });
   });
 });

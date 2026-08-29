@@ -1,5 +1,5 @@
 import { EventEmitter } from "events";
-import { Delivery } from "../db/schema";
+import { TSDelivery } from "../db/schema";
 
 export type DeliveryEventType =
   | "DELIVERY_CREATED"
@@ -10,7 +10,7 @@ export type DeliveryEventType =
 
 export interface RealtimeEvent {
   type: DeliveryEventType;
-  delivery: Delivery;
+  delivery: TSDelivery;
   timestamp: string;
 }
 
