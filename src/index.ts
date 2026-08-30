@@ -5,7 +5,7 @@ import { checkDatabaseConnection, pool } from "./db";
 dotenv.config({ path: ".env.local" });
 dotenv.config();
 
-const PORT = Number(process.env.PORT) || 4000;
+const PORT = Number(process.env.PORT) || 3000;
 
 async function start() {
   await checkDatabaseConnection();
