@@ -1,15 +1,16 @@
-process.env.JWT_SECRET = "test-secret";
-process.env.JWT_EXPIRES_IN = "12h";
-
-jest.mock("../../src/db");
-jest.mock("../../src/controllers/riders.controller");
-
 import request from "supertest";
 import { createApp } from "../../src/app";
 import * as ridersController from "../../src/controllers/riders.controller";
 import { AppError } from "../../src/middleware/errorHandler";
 import { UserRole } from "../../src/types";
 import { fakeController, mockActor, mockUserRow, mockDeliveryRow, authHeaderFor } from "../testUtils";
+
+process.env.JWT_SECRET = "test-secret";
+process.env.JWT_EXPIRES_IN = "12h";
+
+jest.mock("../../src/db");
+jest.mock("../../src/controllers/riders.controller");
+
 
 const app = createApp();
 

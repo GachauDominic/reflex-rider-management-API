@@ -24,6 +24,14 @@
     "experimentalDecorators": true,
     "emitDecoratorMetadata": true
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "src/**/*"],
-  "exclude": ["node_modules", "dist", "k6"]
+  "include": ["src/**/*.ts", "src/**/*", "tests/__mocks__"],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "tests",
+    "k6",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    "src/**/__mocks__/**"
+  ]
 }
