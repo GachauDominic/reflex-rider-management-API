@@ -5,6 +5,8 @@ export default {
   schema: "./src/db/schema.ts",
   out: "./drizzle",
   dialect: "postgresql",
+
+  driver: "pglite",
   dbCredentials: {
     url: (globalThis as typeof globalThis & {
       process: { env: Record<string, string | undefined> };

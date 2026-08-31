@@ -13,7 +13,7 @@ export function createApp() {
 
   app.use(
     cors({
-      origin: process.env.CORS_ORIGIN || "*",
+      origin: process.env.CORS_ORIGIN || `https://reflex-rider-management-client.vercel.app/` || "*",
       methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE',]
     })
   );
