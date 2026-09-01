@@ -2,7 +2,7 @@ import jwt, { SignOptions } from "jsonwebtoken";
 import { AuthTokenPayload } from "../types";
 
 function getJwtSecret(): string {
-  const secret = process.env.JWT_SECRET;
+  const secret = process.env.JWT_SECRET as string;
 
   if (!secret) {
     throw new Error("JWT_SECRET is not configured");
