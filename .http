@@ -1,0 +1,11 @@
+// register user
+POST http://localhost:3000/auth/register
+Content-Type: application/json
+
+{
+  "name": "dom",
+  "email": "domretailer@reflex.demo",
+  "passwordHash": "dom123",
+  "role": "retailer",
+  "phone": "0704644324",
+}

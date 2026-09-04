@@ -6,7 +6,7 @@ import riderRoutes from "./routes/riders.routes";
 import eventRoutes from "./routes/events.routes";
 import { errorHandler } from "./middleware/errorHandler";
 import { logger } from "./middleware/logger";
-import { loginRateLimit } from "./middleware/rateLimit";
+import { loginRateLimit, registrationRateLimit } from "./middleware/rateLimit";
 
 export function createApp() {
   const app = express();
@@ -29,6 +29,7 @@ export function createApp() {
 
   app.use(logger)
   app.use(loginRateLimit)
+  app.use(registrationRateLimit)
 
   app.use((_req, res) => res.status(404).json({ error: "Not found" }));
   app.use(errorHandler);

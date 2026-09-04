@@ -2,9 +2,7 @@ import { Request, Response } from "express";
 import { asyncHandler } from "../middleware/errorHandler";
 import { loginUser, getCurrentUser, registerUser } from "../services/auth.service";
 import { sendMail } from "../mailer/mailer";
-import { hashPassword, verifyPassword } from "../utils/password";
-import { AuthTokenPayload, UserRole } from "../types";
-import { signToken } from "../utils/jwt";
+import { verifyPassword } from "../utils/password";
 
 
 // Controllers only handle HTTP concerns (read the request, call the
@@ -13,40 +11,22 @@ import { signToken } from "../utils/jwt";
 
 export const register = asyncHandler(async (req:Request, res: Response) => {
    try {
-    const user = req.body
-    const password = user.passwordHash;
-    const hashedPassword = await hashPassword(password)
-    user.passwordHash = hashedPassword;
-
-    // generate a 6 digit verification code
-    const verificationCode = Math.floor(100000 + Math.random() * 900000).toString()
-    user.verificationCode = verificationCode;
-    user.isVerified = false;
-
-
-    const createUser = await registerUser(user)
-    if (!createUser) {
-      return res.status(400).json({message: "User not created!"})
-    }
+    const user = await registerUser(req.body ?? {})
     try {
       await sendMail(
         user.email,
-        "verify your account",
-        `Hello ${user.lastName}, your verification code is: ${verificationCode}`,
-        `<div>
-        <h2>Hello ${user.lastName} </h2>  
-        <p>Your verificaton code is: <strong> ${verificationCode} </strong> </p>
-        <p> Enter this code to verify your account </p>
-        </div>`
+        "Welcome to Reflex",
+        `Hello ${user.name}, your Reflex account has been created.`,
+        `<div><h2>Hello ${user.name}</h2><p>Your Reflex account has been created.</p></div>`
       )
     } catch (emailError) {
       console.error("Failed to send registration email:", emailError)
     }
 
-    return res.status(201).json({message: "User created and verification sent to your email"})
+    return res.status(201).json({message: "User created successfully", user})
 
-  } catch (error: any) {
-    return res.status(500).json({error: error.message})
+  } catch (error) {
+    throw error;
   }
 })
 
@@ -54,7 +34,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   try {
    const user = req.body ?? {};
    const email = user.email
-   const password = user.passwordHash
+  const password = user.password
 
     const result = await loginUser(email, password);
     if (!result) {
@@ -68,7 +48,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
     };
     
     return res.status(200).json({
-      signToken,
+      token: result.token,
       user: {
         "user_id": result.user.id,
         "name": result.user.name,
@@ -77,8 +57,8 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
       }
     })
     
-  } catch (error: any) {
-    return res.status(500).json({error: error.message})
+  } catch (error) {
+    throw error;
   }
   
 });

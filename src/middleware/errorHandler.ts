@@ -44,6 +44,10 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
     return res.status(409).json({ error: err.message });
   }
 
+  if (err?.code === "23505") {
+    return res.status(409).json({ error: "An account with that email already exists" });
+  }
+
   console.error("Unhandled error:", err);
   return res.status(500).json({ error: "Internal server error" });
 }

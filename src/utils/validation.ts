@@ -17,6 +17,11 @@ export function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
 }
 
+export function isValidPassword(password: unknown): password is string {
+  if (typeof password !== "string") return false;
+  return password.length >= 8 && Buffer.byteLength(password, "utf8") <= 72;
+}
+
 export class ValidationError extends Error {
   constructor(message: string) {
     super(message);

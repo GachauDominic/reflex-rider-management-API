@@ -36,7 +36,7 @@ export const sendMail = async (
     } else {
       return "Email server error!"
     }
-  } catch (error: any) {
-    return JSON.stringify(error.message, null, 500)
+  } catch (error) {
+    throw error;
   }
 }
